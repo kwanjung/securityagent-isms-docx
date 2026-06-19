@@ -8,7 +8,7 @@
     python generate_isms_report.py <pentest_report.pdf> [output.docx]
     python generate_isms_report.py report.pdf --no-translate          # 영문 원문 유지
     python generate_isms_report.py report.pdf --region ap-northeast-2  # Bedrock 리전 지정
-    python generate_isms_report.py report.pdf --model apac.anthropic.claude-sonnet-4-6
+    python generate_isms_report.py report.pdf --model us.anthropic.claude-opus-4-6-v1
 
 ## 의존성:
     pip install pdfplumber python-docx
