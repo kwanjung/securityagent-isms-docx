@@ -9,6 +9,7 @@
     python generate_isms_report.py report.pdf --no-translate          # 영문 원문 유지
     python generate_isms_report.py report.pdf --region ap-northeast-2  # Bedrock 리전 지정
     python generate_isms_report.py report.pdf --model us.anthropic.claude-opus-4-6-v1
+    python generate_isms_report.py report.pdf --workers # 번역 병렬 스레드 수 (Default 8) 더 빠르게 하려면 --workers 12
 
 ## 의존성:
     pip install pdfplumber python-docx
@@ -19,6 +20,7 @@
     Amazon Bedrock Claude 로 한국어 번역됩니다. Bedrock 미사용/오류 시 영문 원문을
     유지하고 경고만 출력합니다(--no-translate 로 비활성화).
     명령어·경로·페이로드·식별자는 번역하지 않고 원문 그대로 보존합니다.
+    -workers 사용하다가 ThrottlingException 뜨는 경우 --workers 4 처럼 스레드 수를 낮춰주세요.
 
 ## 설계:
     extract_report()  : PDF 파싱 → dict (데이터)
