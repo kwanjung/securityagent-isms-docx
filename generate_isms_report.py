@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, os, re
+import sys, os, re, time
+import threading
+import concurrent.futures
 from datetime import datetime
 import pdfplumber
 from docx import Document
@@ -205,12 +207,14 @@ class Translator:
     """영문 추출 텍스트를 한국어로 번역. 백엔드=Amazon Bedrock Claude(Converse).
     Bedrock 사용 불가 시 원문을 그대로 유지하고 경고만 출력(생성은 계속)."""
 
-    def __init__(self, enabled=True, model_id=DEFAULT_MODEL_ID, region=None):
+    def __init__(self, enabled=True, model_id=DEFAULT_MODEL_ID, region=None, max_workers=8):
         self.enabled = enabled
         self.model_id = model_id
         self.cache = {}
         self.client = None
         self._warned = False
+        self.max_workers = max(1, int(max_workers))
+        self._lock = threading.Lock()
         if not enabled:
             return
         try:
@@ -222,10 +226,13 @@ class Translator:
             self.enabled = False
 
     def _warn(self, msg):
-        if not self._warned:
-            print(f"[번역 경고] {msg}", file=sys.stderr)
-            print("           (번역 없이 영문 원문으로 계속 진행)", file=sys.stderr)
+        with self._lock:
+            if self._warned:
+                return
             self._warned = True
+        # 진행 표시줄과 줄이 겹치지 않게 줄바꿈 후 출력
+        print(f"\n[번역 경고] {msg}", file=sys.stderr)
+        print("           (번역 없이 영문 원문으로 계속 진행)", file=sys.stderr)
 
     def _invoke(self, text):
         resp = self.client.converse(
@@ -236,31 +243,62 @@ class Translator:
         blocks = resp["output"]["message"]["content"]
         return "".join(b.get("text", "") for b in blocks).strip()
 
-    def __call__(self, text):
+    def translate_one(self, text):
+        """단일 문장 번역(캐시·예외처리 포함). 스레드 세이프 — 병렬 호출 가능."""
         if not self.enabled or not text or not _has_english(text):
             return text
-        if text in self.cache:
-            return self.cache[text]
+        with self._lock:
+            if text in self.cache:
+                return self.cache[text]
         try:
             out = self._invoke(text) or text
         except Exception as e:
             self._warn(f"번역 호출 실패 → 원문(영문) 유지: {e}")
             self.enabled = False
             return text
-        self.cache[text] = out
+        with self._lock:
+            self.cache[text] = out
         return out
 
+    def __call__(self, text):
+        return self.translate_one(text)
 
-def translate_data(data, tr):
-    """description / reproduction / 발견 제목 / 위험평가근거(근거문)를 한국어로 번역."""
+
+def translate_data(data, tr, progress=None):
+    """description / reproduction / 발견 제목 / 위험평가근거(근거문)를 한국어로 번역.
+    중복 문장은 한 번만 번역하고, 고유 문장을 스레드풀로 병렬 호출한다.
+    progress(done, total, cached): 진행 콜백(선택)."""
+    # 1) 번역 대상(job) 수집: (적용함수, 원문)
+    jobs = []  # list of (apply_fn, source_text)
     for fd in data["findings"]:
-        if fd.get("title"):
-            fd["title"] = tr(fd["title"])
-        if fd.get("description"):
-            fd["description"] = tr(fd["description"])
-        if fd.get("reproduction"):
-            fd["reproduction"] = tr(fd["reproduction"])
-        fd["risk_reasoning"] = [(m, s, tr(e)) for (m, s, e) in fd.get("risk_reasoning", [])]
+        for key in ("title", "description", "reproduction"):
+            if fd.get(key):
+                jobs.append(((lambda fd, key: (lambda v: fd.__setitem__(key, v)))(fd, key), fd[key]))
+        rr = fd.get("risk_reasoning", [])
+        for i, (m, s, e) in enumerate(rr):
+            jobs.append(((lambda rr, i, m, s: (lambda v: rr.__setitem__(i, (m, s, v))))(rr, i, m, s), e))
+
+    # 2) 실제 번역이 필요한 고유 문장만 추림(중복·비영문·캐시기존 제외)
+    seen, unique_texts = set(), []
+    for _, text in jobs:
+        if text and _has_english(text) and text not in tr.cache and text not in seen:
+            seen.add(text)
+            unique_texts.append(text)
+
+    total = len(unique_texts)
+    # 3) 고유 문장 병렬 번역 (결과는 tr.cache 에 채워짐)
+    if total and tr.enabled:
+        done = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=tr.max_workers) as ex:
+            futures = [ex.submit(tr.translate_one, t) for t in unique_texts]
+            for _ in concurrent.futures.as_completed(futures):
+                done += 1
+                if progress:
+                    progress(done, total, False)
+
+    # 4) 캐시 기반으로 각 위치에 적용 (캐시 적중 → 즉시)
+    for apply_fn, text in jobs:
+        apply_fn(tr.translate_one(text))
     return data
 
 
@@ -559,25 +597,67 @@ def main():
                     help=f"Bedrock 모델/추론 프로파일 ID (기본: {DEFAULT_MODEL_ID})")
     ap.add_argument("--region", default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
                     help="Bedrock 리전 (기본: AWS_REGION 환경변수 / boto3 기본 세션)")
+    ap.add_argument("--workers", type=int, default=8,
+                    help="번역 병렬 호출 스레드 수 (기본: 8). 스로틀링 발생 시 낮추세요.")
     args = ap.parse_args()
 
     if not os.path.isfile(args.pdf):
         print(f"파일을 찾을 수 없음: {args.pdf}"); sys.exit(1)
 
+    def _fmt(sec):
+        sec = int(round(sec)); return f"{sec // 60:02d}:{sec % 60:02d}"
+
+    t_start = time.perf_counter()
+
+    # ── 1단계: PDF 추출 ──
+    print("● PDF 추출 중 …", flush=True)
+    t0 = time.perf_counter()
     data = extract_report(args.pdf)
+    t_extract = time.perf_counter() - t0
+    print(f"  └ 완료: 발견 {len(data['findings'])}건 / 위험유형 {len(data['tasks']['types'])}종 / "
+          f"태스크 {data['tasks']['total']}개  ({_fmt(t_extract)})", flush=True)
 
+    # ── 2단계: 번역 ──
+    t_translate = 0.0
     if not args.no_translate:
-        tr = Translator(enabled=True, model_id=args.model, region=args.region)
+        tr = Translator(enabled=True, model_id=args.model, region=args.region,
+                        max_workers=args.workers)
         if tr.enabled:
-            print(f"번역 중(한국어) … 모델={args.model}"
-                  f"{' / 리전=' + args.region if args.region else ''}")
-            translate_data(data, tr)
+            print(f"● 번역 중(한국어) … 모델={args.model}"
+                  f"{' / 리전=' + args.region if args.region else ''}"
+                  f" / 병렬={tr.max_workers}", flush=True)
+            tt = time.perf_counter()
 
+            def progress(done, total, cached):
+                el = time.perf_counter() - tt
+                rate = el / done if done else 0
+                eta = rate * (total - done)
+                bar_len = 24
+                filled = int(bar_len * done / total) if total else bar_len
+                bar = "█" * filled + "░" * (bar_len - filled)
+                sys.stdout.write(
+                    f"\r  [{bar}] {done}/{total} ({done * 100 // total if total else 100}%) "
+                    f"| 경과 {_fmt(el)} | 남은≈{_fmt(eta)} | {rate:.1f}s/건   ")
+                sys.stdout.flush()
+                if done == total:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+
+            translate_data(data, tr, progress)
+            t_translate = time.perf_counter() - tt
+            print(f"  └ 번역 완료  ({_fmt(t_translate)}, 캐시 적중 {len(tr.cache)}개 고유문장)", flush=True)
+
+    # ── 3단계: DOCX 생성 ──
+    print("● 문서(.docx) 생성 중 …", flush=True)
+    t0 = time.perf_counter()
     out = args.out or f"ISMS-P_취약점점검결과보고서_{data['target']}.docx"
     build_docx(data, out)
-    print(f"추출: 발견 {len(data['findings'])}건 / 위험유형 {len(data['tasks']['types'])}종 / "
-          f"태스크 {data['tasks']['total']}개")
-    print(f"생성 완료: {out}")
+    t_build = time.perf_counter() - t0
+
+    total = time.perf_counter() - t_start
+    print(f"  └ 생성 완료: {out}  ({_fmt(t_build)})", flush=True)
+    print(f"\n⏱  실행 시간 — 추출 {_fmt(t_extract)} · 번역 {_fmt(t_translate)} · "
+          f"문서 {_fmt(t_build)} · 합계 {_fmt(total)}", flush=True)
 
 
 if __name__ == "__main__":
