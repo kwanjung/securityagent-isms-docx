@@ -1,9 +1,9 @@
 import json, subprocess, os
 import boto3
-SPACE = "as-9507ba26-9fbf-43a1-9d3b-383d61b72d0b"
-JOB = "pj-d7c6ded2-6ee8-4542-92d7-268ab21e2f9d"
+SPACE = "as-9507ba26-9fbf-43a1-9d3b-383d61b72d0b" # 워크샵 SpaceID 값 입력
+JOB = "pj-d7c6ded2-6ee8-4542-92d7-268ab21e2f9d" # 워크샵 Pentest Job ID 값 입력
 REGION = os.environ.get("AWS_REGION", "us-east-1")
-MODEL_ID = "arn:aws:bedrock:us-east-1:168029808382:inference-profile/us.anthropic.claude-opus-4-6-v1"
+MODEL_ID = "arn:aws:bedrock:us-east-1:[워크샵 Account ID로 변경]:inference-profile/us.anthropic.claude-opus-4-6-v1"  
 
 bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
