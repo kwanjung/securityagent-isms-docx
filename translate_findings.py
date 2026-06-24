@@ -1,9 +1,9 @@
 import json, subprocess, os
 import boto3
-SPACE = "as-eff8b6eb-fc73-4ded-be7d-c2a04cf779bc"
-JOB = "pj-86d24466-97de-41a4-9a51-01d673eb19aa"
+SPACE = "as-9507ba26-9fbf-43a1-9d3b-383d61b72d0b"
+JOB = "pj-d7c6ded2-6ee8-4542-92d7-268ab21e2f9d"
 REGION = os.environ.get("AWS_REGION", "us-east-1")
-MODEL_ID = "arn:aws:bedrock:us-east-1:454809664495:inference-profile/us.anthropic.claude-opus-4-6-v1"
+MODEL_ID = "arn:aws:bedrock:us-east-1:168029808382:inference-profile/us.anthropic.claude-opus-4-6-v1"
 
 bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
@@ -15,8 +15,7 @@ def translate_name(name):
 	body = json.dumps({
 		"anthropic_version": "bedrock-2023-05-31",
 		"max_tokens": 200,
-		"messages": [{"role": "user", "content": f"다음 보안 취약점 이름을 한국어로
-간결하게 번역해 주세요. (번역 결과만 출력):\n{name}"}]
+		"messages": [{"role": "user", "content": f"다음 보안 취약점 이름을 한국어로 간결하게 번역해 주세요. (번역 결과만 출력):\n{name}"}]
 	})
 	try:
 		resp = bedrock.invoke_model(modelId=MODEL_ID, contentType="application/json", body=body)
@@ -37,4 +36,4 @@ print("-" * 110)
 
 for f in findings:
 	name_kr = translate_name(f.get("name", "N/A"))
-print(f"{f.get('riskType','N/A'):<30}|{f.get('riskLevel','N/A'):<12}|{f.get('confidence','N/A'):<14}|{name_kr}")
+	print(f"{f.get('riskType','N/A'):<30}|{f.get('riskLevel','N/A'):<12}|{f.get('confidence','N/A'):<14}|{name_kr}")
