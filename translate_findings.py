@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json, subprocess, os
 import boto3
 SPACE = "as-9507ba26-9fbf-43a1-9d3b-383d61b72d0b" # 워크샵 SpaceID 값 입력
